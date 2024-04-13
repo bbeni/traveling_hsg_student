@@ -17,8 +17,10 @@
 typedef float Vec2[2];
 
 typedef struct {
-	size_t count;
-	Vec2   *positions;
+	size_t    count;
+	Vec2     *positions;
+	uint32_t *cons;
+	float     total;
 } TSP_Info;
 
 // my weird addition to nob.h :)
@@ -112,7 +114,11 @@ bool read_tsp(const char *tsp_file, TSP_Info *tsp_out)
 
 		tsp.count = dim;
 		tsp.positions = malloc(sizeof(Vec2) * dim);
+		tsp.cons = malloc(sizeof(*tsp.cons) * dim);
+
 		assert(tsp.positions != NULL);
+		assert(tsp.cons != NULL);
+
 		printf("read_tsp: found %d coordinates\n", (int)dim);
 	}
 
@@ -178,16 +184,14 @@ void normalize_bounds(TSP_Info *tsp)
 }
 
 
-int main(void)
+int generate_usa_picture(void)
 {
 	const char *file = "test_data/usa13509.tsp";
-	//const char *file = "test_data/berlin52.tsp";
 
 	TSP_Info tsp = {0};
 	read_tsp(file, &tsp);
 
 	normalize_bounds(&tsp);
-
 	{
 		//uint32_t width  = 1920;
 		//uint32_t height = 1080;
@@ -213,6 +217,98 @@ int main(void)
 
 		stbi_write_png(filename, width, height, 4, pixels, width*sizeof(*pixels));
 	}
+
+	return 0;
+}
+
+float dist(TSP_Info *tsp, int i, int j)
+{
+	float dx = tsp->positions[i][0] - tsp->positions[j][0];
+	float dy = tsp->positions[i][1] - tsp->positions[j][1];
+	return sqrtf(dx*dx + dy*dy);
+}
+
+void init_configuration(TSP_Info *tsp)
+{
+	tsp->total = 0;
+	for (uint32_t i = 0; i < tsp->count; ++i) {
+		int next_index = (i + 1) % tsp->count;
+		tsp->cons[i] = next_index;
+		tsp->total += dist(tsp, i, next_index);
+	}
+}
+
+// propose a swap of two connections and return the diff in total length
+float propose_swap(TSP_Info *tsp, int i, int j)
+{
+	assert(i >= 0 && j >= 0 && i < tsp->count && j < tsp->count);
+	int t1 = tsp->cons[i];
+	int t2 = tsp->cons[j];
+	float l_prev = dist(tsp, i, t1) + dist(tsp, j, t2);
+	float l_new  = dist(tsp, i, t2) + dist(tsp, j, t1);
+	return l_new - l_prev;
+}
+
+void do_swap(TSP_Info *tsp, int i, int j, float delta_l)
+{
+	tsp->total += delta_l;
+	int t1 = tsp->cons[i];
+	int t2 = tsp->cons[j];
+	tsp->cons[i] = t2;
+	tsp->cons[j] = t1;
+}
+
+// fermi dirac
+float p(float dist, float temperature)
+{
+	return 1.0 / (1 + expf(dist/temperature));
+}
+
+int main(void)
+{
+	//const char *file = "test_data/usa13509.tsp";
+	const char *file = "test_data/berlin52.tsp";
+
+	TSP_Info tsp = {0};
+	read_tsp(file, &tsp);
+	init_configuration(&tsp);
+
+	assert(tsp.positions != NULL);
+	assert(tsp.cons != NULL);
+
+
+	const int NSTEPS = 100000000;
+
+	float temperature = 0.01;
+	float start_total = tsp.total;
+	for (int step = 0; step < NSTEPS; step++) {
+
+		int i = rand()%tsp.count;
+		int j = rand()%tsp.count;
+
+
+		float delta_l  = propose_swap(&tsp, i, j);
+		float random_p = (float)rand()/ (float)RAND_MAX;
+
+		if (random_p < p(delta_l, temperature)) {
+			// accepted
+			do_swap(&tsp, i, j, delta_l);
+			//printf("ACCEPTED dist change `%f` (random p=%f) with temperature `%f`\n", delta_l, random_p, temperature);
+
+		} else {
+			//printf("Rejected dist change `%f` (random p=%f) with temperature `%f`\n", delta_l, random_p, temperature);
+		}
+
+
+		//printf("Total Distance is: %f\n", tsp.total);
+	}
+
+	printf("\n--------\nSUMMARY:\n--------\n\n");
+	printf("Start config dist: %f\n", start_total);
+	printf("End config dist:   %f\n", tsp.total);
+	printf("temperature:       %f\n", temperature);
+	printf("number of steps:   %d\n", NSTEPS);
+	printf("\n");
 
 	return 0;
 }
