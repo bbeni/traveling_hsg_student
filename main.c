@@ -23,6 +23,13 @@ typedef struct {
 	float     total;
 } TSP_Info;
 
+typedef struct {
+	uint32_t *pixels;
+	size_t    w, h;
+} Image;
+
+#define IMG_AT(img, x, y) img.pixels[y*img.w + x]
+
 // my weird addition to nob.h :)
 bool nob_sv_begins_cstr(Nob_String_View sv, const char *cstr)
 {
@@ -184,6 +191,21 @@ void normalize_bounds(TSP_Info *tsp)
 }
 
 
+void line(Image img, int x0, int y0, int x1, int y1, uint32_t color)
+{
+	int dx =  abs (x1 - x0), sx = x0 < x1 ? 1 : -1;
+	int dy = -abs (y1 - y0), sy = y0 < y1 ? 1 : -1;
+	int err = dx + dy, e2; /* error value e_xy */
+
+	for (;;) {
+		IMG_AT(img, x0, y0) = color;
+		if (x0 == x1 && y0 == y1) break;
+		e2 = 2 * err;
+		if (e2 >= dy) { err += dy; x0 += sx; } /* e_xy+e_x > 0 */
+		if (e2 <= dx) { err += dx; y0 += sy; } /* e_xy+e_y < 0 */
+	}
+}
+
 int generate_usa_picture(void)
 {
 	const char *file = "test_data/usa13509.tsp";
@@ -221,6 +243,41 @@ int generate_usa_picture(void)
 	return 0;
 }
 
+void generate_edges_png(const char *fname, TSP_Info *tsp, int w, int h, uint32_t bg, uint32_t pos, uint32_t edge)
+{
+	normalize_bounds(tsp);
+	{
+		Image img = {0};
+		img.w = w;
+		img.h = h;
+		img.pixels = malloc(sizeof(img.pixels) * w * h);
+
+		for (size_t i = 0; i < img.w * img.h; i++) {
+			img.pixels[i] = bg;
+		}
+
+		for (size_t i = 0; i < tsp->count; i++) {
+			int next_index = tsp->cons[i];
+			uint32_t x = (img.w-1) * (1.0 - tsp->positions[i][1]);
+			uint32_t y = (img.h-1) * (1.0 - tsp->positions[i][0]);
+			uint32_t xn = (img.w-1) * (1.0 - tsp->positions[next_index][1]);
+			uint32_t yn = (img.h-1) * (1.0 - tsp->positions[next_index][0]);
+			printf("%d %d %d %d [%d %d]", x, y, xn, yn, img.w, img.h);
+			line(img, x, y, xn, yn, edge);
+		}
+
+		for (size_t i = 0; i < tsp->count; i++) {
+			uint32_t x = (img.w-1) * (1.0 - tsp->positions[i][1]);
+			uint32_t y = (img.h-1) * (1.0 - tsp->positions[i][0]);
+			IMG_AT(img, x, y) = pos;
+		}
+
+		stbi_write_png(fname, w, h, 4, img.pixels, img.w*sizeof(img.pixels));
+	}
+
+	return 0;
+}
+
 float dist(TSP_Info *tsp, int i, int j)
 {
 	float dx = tsp->positions[i][0] - tsp->positions[j][0];
@@ -238,12 +295,24 @@ void init_configuration(TSP_Info *tsp)
 	}
 }
 
+void calc_total(TSP_Info *tsp)
+{
+	tsp->total = 0;
+	for (uint32_t i = 0; i < tsp->count; ++i) {
+		int next_index = tsp->cons[i];
+		tsp->total += dist(tsp, i, next_index);
+	}
+}
+
 // propose a swap of two connections and return the diff in total length
 float propose_swap(TSP_Info *tsp, int i, int j)
 {
 	assert(i >= 0 && j >= 0 && i < tsp->count && j < tsp->count);
 	int t1 = tsp->cons[i];
 	int t2 = tsp->cons[j];
+	if (t1 == j || t2 == i) {
+		return FLT_MAX;
+	}
 	float l_prev = dist(tsp, i, t1) + dist(tsp, j, t2);
 	float l_new  = dist(tsp, i, t2) + dist(tsp, j, t1);
 	return l_new - l_prev;
@@ -264,6 +333,11 @@ float p(float dist, float temperature)
 	return 1.0 / (1 + expf(dist/temperature));
 }
 
+const int opt_berlin_tour[] = \
+{49-1, 32-1, 45-1, 19-1, 41-1, 8-1, 9-1, 10-1, 43-1, 33-1, 51-1, 11-1, 52-1, 14-1, 13-1, 47-1, 26-1, 27-1, 28-1, 12-1, 25-1,
+4-1, 6-1, 15-1, 5-1, 24-1, 48-1, 38-1, 37-1, 40-1, 39-1, 36-1, 35-1, 34-1, 44-1, 46-1, 16-1, 29-1, 50-1, 20-1, 23-1, 30-1, 2-1,
+ 7-1, 42-1, 21-1, 17-1, 3-1, 18-1, 31-1, 22-1, 1-1};
+
 int main(void)
 {
 	//const char *file = "test_data/usa13509.tsp";
@@ -277,15 +351,16 @@ int main(void)
 	assert(tsp.cons != NULL);
 
 
-	const int NSTEPS = 100000000;
+	const int NSTEPS = 1000000;
 
-	float temperature = 0.01;
+	float start_temperature = 200;
+	float temperature;
 	float start_total = tsp.total;
 	for (int step = 0; step < NSTEPS; step++) {
+		temperature = (float)(NSTEPS - step) / (float)NSTEPS * (float)start_temperature;
 
 		int i = rand()%tsp.count;
 		int j = rand()%tsp.count;
-
 
 		float delta_l  = propose_swap(&tsp, i, j);
 		float random_p = (float)rand()/ (float)RAND_MAX;
@@ -303,12 +378,29 @@ int main(void)
 		//printf("Total Distance is: %f\n", tsp.total);
 	}
 
+
 	printf("\n--------\nSUMMARY:\n--------\n\n");
 	printf("Start config dist: %f\n", start_total);
 	printf("End config dist:   %f\n", tsp.total);
+
+	generate_edges_png("berlin.png", &tsp, 1080, 720, 0xFF000000, 0xFFFF0000, 0xFF00FF00);
+
+	tsp.cons = opt_berlin_tour;
+
+	generate_edges_png("berlin_opt.png", &tsp, 1080, 720, 0xFF000000, 0xFFFF0000, 0xFF00FF00);
+
+	calc_total(&tsp);
+	printf("Optimal dist:      %f\n", tsp.total);
 	printf("temperature:       %f\n", temperature);
 	printf("number of steps:   %d\n", NSTEPS);
 	printf("\n");
+	printf("Tour:\n1");
+
+	for (int i = 0; i < tsp.count; i++) {
+		printf(" -> %d", tsp.cons[i] + 1);
+	}
+
+	printf("\n\n");
 
 	return 0;
 }
