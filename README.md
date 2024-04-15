@@ -4,27 +4,28 @@
 
 Task for ESC202 implemented using C. The only dependency is the cl.exe compiler on windows - we are just using [stb](https://github.com/nothings/stb) (header only) style libraries.
 
-## Burma14
+## Results
+### Burma14
 
-Random inital tour on top (length: 7969) \\
-Optimized tour on bottom ( length: 3454)
+Random inital tour on top (length: 7969) <br />
+Optimized tour on bottom (length: 3454)
 
 ![burma 14](/burma_random.png)
 ![burma 14](/burma_optimized.png)
 
-## Berlin52
+### Berlin52
 
-Random inital tour on top (length: 29716) \\
-Optimized tour on bottom ( length: 11160)
+Random inital tour on top (length: 29716) <br />
+Optimized tour on bottom (length: 11160)
 
 ![berlin](/berlin_random.png)
 ![berlin](/berlin_optimized.png)
 
-## USA13509
+### USA13509
 
-Too big.. \\
-Random inital tour on top (length: 216647526) \\
-Optimized tour on bottom ( length: 55982547)
+Too big.. <br />
+Random inital tour on top (length: 216647526) <br />
+Optimized tour on bottom (length: 55982547)
 
 ![berlin](/usa_random.png)
 ![berlin](/usa_optimized.png)
