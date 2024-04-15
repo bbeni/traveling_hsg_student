@@ -15,14 +15,15 @@
 //
 
 // permutation length for shuffling connections
-#define PERM_LEN 8
+int perm_len = 8;
 
 // number of steps to perform
-const int NSTEPS = 1000000;
+const int NSTEPS = 10000000;
 
-// linearly decreased together with fermi dirac distr as acceptance probability
+// linearly decreased together and used with
+// fermi dirac distribution as acceptance probability
 // this kinda makes it a simulated annealing approach
-float start_temperature = 100.f;
+float start_temperature = 200.f;
 
 //
 // ##### CONFIG ######
@@ -285,8 +286,8 @@ void draw_tsp(Image img, TSP_Info *tsp, uint32_t bg, uint32_t pos, uint32_t edge
 	}
 
 	for (size_t i = 0; i < tsp->count; i++) {
-		uint32_t x = (img.w-1) * (1.0 - positions[i][1]);
-		uint32_t y = (img.h-1) * (1.0 - positions[i][0]);
+		uint32_t x = (uint32_t) ((img.w-1) * (1.0 - positions[i][1]));
+		uint32_t y = (uint32_t) ((img.h-1) * (1.0 - positions[i][0]));
 		IMG_AT(img, x, y) = pos;
 	}
 }
@@ -405,8 +406,13 @@ int main(void)
 	assert(tsp.positions != NULL);
 	assert(tsp.cons != NULL);
 
-	generate_png("berlin_random.png", tsp, 1080, 720, 0xFF000000, 0xFFFF0000, 0xFF00FF00);
+	shuffle_con(&tsp, 0, perm_len);
+	while (!only_one_loop(&tsp)) {
+		shuffle_con(&tsp, 0, tsp.count);
+	}
+	calc_total(&tsp);
 
+	generate_png("berlin_random.png", tsp, 1080, 720, 0xFF000000, 0xFFFF0000, 0xFF00FF00);
 
 	float temperature;
 	float start_total = tsp.total;
@@ -414,23 +420,24 @@ int main(void)
 
 	for (int step = 0; step < NSTEPS; step++) {
 		//assert(only_one_loop(&tsp));
-		temperature = (float)(NSTEPS - step) / (float)NSTEPS * (float)start_temperature;
-		size_t shuffle_start = rand()%tsp.count;
+		temperature = start_temperature * (float)(NSTEPS - step - 1) / (float)NSTEPS;
+		size_t random_con = rand()%tsp.count;
 
+		nob_temp_reset();
 		// backup the cons so we can restore if invalid
-		int cons_window[PERM_LEN] = {0};
+		int *cons_window = nob_temp_alloc(sizeof(*(tsp.cons)) * perm_len);
 
-		for (int i = 0; i < PERM_LEN; i++) {
-			cons_window[i] = CON_AT(&tsp, shuffle_start + i);
+		for (int i = 0; i < perm_len; i++) {
+			cons_window[i] = CON_AT(&tsp, random_con + i);
 		}
 
 		float total_before = tsp.total;
 
 
-		shuffle_con(&tsp, shuffle_start, PERM_LEN);
+		shuffle_con(&tsp, random_con, perm_len);
 
 		while (!only_one_loop(&tsp)) {
-			shuffle_con(&tsp, shuffle_start, PERM_LEN);
+			shuffle_con(&tsp, random_con, perm_len);
 		}
 		calc_total(&tsp);
 
@@ -443,8 +450,8 @@ int main(void)
 		} else {
 			//printf("Rejected dist change `%f` (random p=%f) with temperature `%f`\n", delta_l, random_p, temperature);
 			//restore!
-			for (int i = 0; i < PERM_LEN; i++) {
-				CON_AT(&tsp, shuffle_start + i) = cons_window[i];
+			for (int i = 0; i < perm_len; i++) {
+				CON_AT(&tsp, random_con + i) = cons_window[i];
 			}
 			calc_total(&tsp);
 		}
@@ -456,16 +463,13 @@ int main(void)
 	printf("\n--------\nSUMMARY:\n--------\n\n");
 	printf("Start config dist: %f\n", start_total);
 	printf("End config dist:   %f\n", tsp.total);
-
-	calc_total(&tsp);
-	printf("End accurate dist: %f\n", tsp.total);
-	printf("temperature:       %f\n", temperature);
+	printf("End temperature:   %f\n", temperature);
 	printf("number of steps:   %d\n", NSTEPS);
 	printf("\n");
 	printf("Tour:\n1");
 
-	for (int i = 0; i < tsp.count; i++) {
-		printf(" -> %d", tsp.cons[i] + 1);
+	for (uint16_t i = 0; i < tsp.count; i++) {
+		printf(" -> %zd", tsp.cons[i] + 1);
 	}
 
 
