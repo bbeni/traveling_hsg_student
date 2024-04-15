@@ -5,23 +5,38 @@
 #include <float.h>
 #include <ctype.h>
 #include <math.h>
-
-
 #define NOB_IMPLEMENTATION
 #include "nob.h"
-
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
+//
+// ##### CONFIG ######
+//
+
+// permutation length for shuffling connections
+#define PERM_LEN 8
+
+// number of steps to perform
+const int NSTEPS = 1000000;
+
+// linearly decreased together with fermi dirac distr as acceptance probability
+// this kinda makes it a simulated annealing approach
+float start_temperature = 100.f;
+
+//
+// ##### CONFIG ######
+//
 
 typedef float Vec2[2];
-
 typedef struct {
 	size_t    count;
 	Vec2     *positions;
-	uint32_t *cons;
+	size_t   *cons;
 	float     total;
 } TSP_Info;
+
+#define CON_AT(tsp, i) (tsp)->cons[(i) % (tsp)->count]
 
 typedef struct {
 	uint32_t *pixels;
@@ -163,42 +178,31 @@ bool read_tsp(const char *tsp_file, TSP_Info *tsp_out)
 	return true;
 }
 
-bool only_one_loop(TSP_Info *tsp)
-{
-	int next = tsp->cons[0];
-	for (int count = 0; count < tsp->count - 1; count++) {
-		if (next == 0) return false;
-		next = tsp->cons[next];
-	}
-	return (next == 0);
-}
-
-void normalize_bounds(TSP_Info *tsp)
+// normalize the positions to ly in [0, 1] x [0, 1]
+void normalize_bounds(Vec2 *positions, size_t count)
 {
 	float min_x = FLT_MAX;
 	float max_x = -FLT_MAX;
-
 	float min_y = FLT_MAX;
 	float max_y = -FLT_MAX;
 
-	for (size_t i = 0; i < tsp->count; ++i) {
-		if (min_x > tsp->positions[i][0]) min_x = tsp->positions[i][0];
-		if (max_x < tsp->positions[i][0]) max_x = tsp->positions[i][0];
-		if (min_y > tsp->positions[i][1]) min_y = tsp->positions[i][1];
-		if (max_y < tsp->positions[i][1]) max_y = tsp->positions[i][1];
+	for (size_t i = 0; i < count; ++i) {
+		if (min_x > positions[i][0]) min_x = positions[i][0];
+		if (max_x < positions[i][0]) max_x = positions[i][0];
+		if (min_y > positions[i][1]) min_y = positions[i][1];
+		if (max_y < positions[i][1]) max_y = positions[i][1];
 	}
 
 	float normalize_factor_x = 1.0f / (max_x - min_x);
 	float normalize_factor_y = 1.0f / (max_y - min_y);
 
-	printf("Widht, height in coordinate space [%f, %f]\n", max_x - min_x, max_y - min_y);
+	//printf("[w, h] before normalization [%f, %f]\n", max_x - min_x, max_y - min_y);
 
-	for (size_t i = 0; i < tsp->count; ++i) {
-		tsp->positions[i][0] -= min_x;
-		tsp->positions[i][0] *= normalize_factor_x;
-		tsp->positions[i][1] -= min_y;
-		tsp->positions[i][1] *= normalize_factor_y;
-
+	for (size_t i = 0; i < count; ++i) {
+		positions[i][0] -= min_x;
+		positions[i][0] *= normalize_factor_x;
+		positions[i][1] -= min_y;
+		positions[i][1] *= normalize_factor_y;
 	}
 }
 
@@ -225,7 +229,11 @@ int generate_usa_picture(void)
 	TSP_Info tsp = {0};
 	read_tsp(file, &tsp);
 
-	normalize_bounds(&tsp);
+	Vec2 *positions = nob_temp_alloc(sizeof(*tsp.positions) * tsp.count);
+	assert(positions != NULL);
+	memcpy(positions, tsp.positions, sizeof(*tsp.positions) * tsp.count);
+
+	normalize_bounds(positions, tsp.count);
 	{
 		//uint32_t width  = 1920;
 		//uint32_t height = 1080;
@@ -243,8 +251,8 @@ int generate_usa_picture(void)
 
 		// draw a pixel per coordinate
 		for (size_t i = 0; i < tsp.count; i++) {
-			uint32_t x = (width-1) * (1.0 - tsp.positions[i][1]);
-			uint32_t y = (height-1) * (1.0 - tsp.positions[i][0]);
+			uint32_t x = (uint32_t) ((width -1) * (1.0-positions[i][1]));
+			uint32_t y = (uint32_t) ((height-1) * (1.0-positions[i][0]));
 
 			pixels[y*width + x] = (uint32_t)0xFF000000;
 		}
@@ -257,24 +265,28 @@ int generate_usa_picture(void)
 
 void draw_tsp(Image img, TSP_Info *tsp, uint32_t bg, uint32_t pos, uint32_t edge)
 {
-	normalize_bounds(tsp);
+	Vec2 *positions = nob_temp_alloc(sizeof(Vec2)*tsp->count);
+	assert(positions != NULL);
+	memcpy(positions, tsp->positions, sizeof(Vec2)*tsp->count);
+	normalize_bounds(positions, tsp->count);
+
 	for (size_t i = 0; i < img.w * img.h; i++) {
 		img.pixels[i] = bg;
 	}
 
 	for (size_t i = 0; i < tsp->count; i++) {
 		int next_index = tsp->cons[i];
-		uint32_t x = (img.w-1) * (1.0 - tsp->positions[i][1]);
-		uint32_t y = (img.h-1) * (1.0 - tsp->positions[i][0]);
-		uint32_t xn = (img.w-1) * (1.0 - tsp->positions[next_index][1]);
-		uint32_t yn = (img.h-1) * (1.0 - tsp->positions[next_index][0]);
+		uint32_t x =  (uint32_t) ((img.w-1) * (1.0-positions[i][1]));
+		uint32_t y =  (uint32_t) ((img.h-1) * (1.0-positions[i][0]));
+		uint32_t xn = (uint32_t) ((img.w-1) * (1.0-positions[next_index][1]));
+		uint32_t yn = (uint32_t) ((img.h-1) * (1.0-positions[next_index][0]));
 		//printf("%d %d %d %d [%d %d]", x, y, xn, yn, img.w, img.h);
 		line(img, x, y, xn, yn, edge);
 	}
 
 	for (size_t i = 0; i < tsp->count; i++) {
-		uint32_t x = (img.w-1) * (1.0 - tsp->positions[i][1]);
-		uint32_t y = (img.h-1) * (1.0 - tsp->positions[i][0]);
+		uint32_t x = (img.w-1) * (1.0 - positions[i][1]);
+		uint32_t y = (img.h-1) * (1.0 - positions[i][0]);
 		IMG_AT(img, x, y) = pos;
 	}
 }
@@ -285,7 +297,7 @@ void generate_png(const char *fname, TSP_Info tsp, int w, int h, uint32_t bg, ui
 	img.w = w;
 	img.h = h;
 	img.pixels = malloc(sizeof(img.pixels) * img.w * img.h);
-	draw_tsp(img, &tsp, img.w, img.h, bg, pos, edge);
+	draw_tsp(img, &tsp, bg, pos, edge);
 	stbi_write_png(fname, img.w, img.h, 4, img.pixels, img.w*sizeof(img.pixels));
 }
 
@@ -315,7 +327,18 @@ void calc_total(TSP_Info *tsp)
 	}
 }
 
-// propose a swap of two connections and return the diff in total length
+bool only_one_loop(TSP_Info *tsp)
+{
+	size_t next = tsp->cons[0];
+	for (size_t count = 0; count < tsp->count - 1; count++) {
+		if (next == 0) return false;
+		//printf("%zd\n", next);
+		next = tsp->cons[next];
+	}
+	return (next == 0);
+}
+
+/*// propose a swap of two connections and return the diff in total length
 float propose_swap(TSP_Info *tsp, int i, int j)
 {
 	assert(i >= 0 && j >= 0 && i < tsp->count && j < tsp->count);
@@ -335,13 +358,40 @@ void do_swap(TSP_Info *tsp, int i, int j)
 	int t2 = tsp->cons[j];
 	tsp->cons[i] = t2;
 	tsp->cons[j] = t1;
-}
+}*/
 
 // fermi dirac
 float p(float dist, float temperature)
 {
-	return 1.0 / (1 + expf(dist/temperature));
+	return (float)1.0 / (1 + expf(dist/temperature));
 }
+
+
+//	# # # # # a b c d # # #
+//			  2 1 3 0
+//	       -> d b a c
+// generate a random permutation sequence of length n
+//
+// ok just use a shuffle :) reference:
+// https://stackoverflow.com/questions/6127503/shuffle-array-in-c
+//
+//
+
+void shuffle_con(TSP_Info *tsp, size_t start, size_t n)
+{
+    if (n > 1)
+    {
+        size_t i;
+        for (i = 0; i < n - 1; i++)
+        {
+          size_t j = i + rand() / (RAND_MAX / (n - i) + 1);
+          size_t t = CON_AT(tsp, start + j);
+          CON_AT(tsp, start + j) = CON_AT(tsp, start + i);
+          CON_AT(tsp, start + i) = t;
+        }
+    }
+}
+
 
 int main(void)
 {
@@ -355,44 +405,49 @@ int main(void)
 	assert(tsp.positions != NULL);
 	assert(tsp.cons != NULL);
 
-	//generate_png("berlin_random.png", tsp, 1080, 720, 0xFF000000, 0xFFFF0000, 0xFF00FF00);
+	generate_png("berlin_random.png", tsp, 1080, 720, 0xFF000000, 0xFFFF0000, 0xFF00FF00);
 
-	const int NSTEPS = 10000;
 
-	float start_temperature = 200;
 	float temperature;
 	float start_total = tsp.total;
-
 	assert(only_one_loop(&tsp));
 
 	for (int step = 0; step < NSTEPS; step++) {
+		//assert(only_one_loop(&tsp));
 		temperature = (float)(NSTEPS - step) / (float)NSTEPS * (float)start_temperature;
+		size_t shuffle_start = rand()%tsp.count;
 
-		int i = 0;
-		int j = 0;
-		while (i == j) {
-			i = rand()%tsp.count;
-			j = rand()%tsp.count;
+		// backup the cons so we can restore if invalid
+		int cons_window[PERM_LEN] = {0};
+
+		for (int i = 0; i < PERM_LEN; i++) {
+			cons_window[i] = CON_AT(&tsp, shuffle_start + i);
 		}
 
+		float total_before = tsp.total;
 
-		float delta_l  = propose_swap(&tsp, i, j);
+
+		shuffle_con(&tsp, shuffle_start, PERM_LEN);
+
+		while (!only_one_loop(&tsp)) {
+			shuffle_con(&tsp, shuffle_start, PERM_LEN);
+		}
+		calc_total(&tsp);
+
+		float delta_l = tsp.total - total_before;
 		float random_p = (float)rand()/ (float)RAND_MAX;
 
-		if (random_p < p(delta_l, temperature)) {
-			do_swap(&tsp, i, j);
-			tsp.total += delta_l;
-			if (only_one_loop(&tsp)) {
-				printf("ACCEPTED dist change `%f` (random p=%f) with temperature `%f`\n", delta_l, random_p, temperature);
-			} else {
-				//restore!
-				do_swap(&tsp, i, j);
-				tsp.total -= delta_l;
-			}
+		if (delta_l != 0.0f && random_p < p(delta_l, temperature)) {
+			printf("%9s: ", nob_temp_sprintf("%zd", step));
+			printf("ACCEPTED dist change at temp `%f` with delta `%f` (random p=%f) \n", temperature, delta_l, random_p);
 		} else {
 			//printf("Rejected dist change `%f` (random p=%f) with temperature `%f`\n", delta_l, random_p, temperature);
+			//restore!
+			for (int i = 0; i < PERM_LEN; i++) {
+				CON_AT(&tsp, shuffle_start + i) = cons_window[i];
+			}
+			calc_total(&tsp);
 		}
-
 
 		//printf("Total Distance is: %f\n", tsp.total);
 	}

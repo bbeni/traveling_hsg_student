@@ -8,6 +8,8 @@ int main(int argc, char **argv) {
 
 	Nob_Cmd cmd = {0};
 	nob_cmd_append(&cmd, "cl.exe");
+	nob_cmd_append(&cmd, "/Debug");
+	//nob_cmd_append(&cmd, "/O");
 	nob_cmd_append(&cmd, "/Wall");
 	nob_cmd_append(&cmd, "main.c");
 
