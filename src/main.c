@@ -1,3 +1,11 @@
+/* Traveling Sales person symmetric monte carlo/ simulated annealing.
+   File data description http://comopt.ifi.uni-heidelberg.de/software/TSPLIB95/tsp95.pdf.
+
+   By Benjamin Froelich 14.4.2024
+
+   ONLY EUC_2D and GEO edge weights implemented!
+*/
+
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -10,31 +18,24 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
-//
-// ##### CONFIG ######
-//
-
 // permutation length for shuffling connections
-int perm_len = 8;
+// randomly chose a length in this range and shuffle part of connections array
+int perm_min = 7;
+int perm_max = 11; // non incluseive
 
-// number of steps to perform
-const int NSTEPS = 10000000;
-
-// linearly decreased together and used with
-// fermi dirac distribution as acceptance probability
+// fermi dirac is used with decreasing
 // this kinda makes it a simulated annealing approach
-float start_temperature = 200.f;
-
-//
-// ##### CONFIG ######
-//
+float p(float dist, float temperature)
+{
+	return (float)1.0 / (1 + expf(dist/temperature));
+}
 
 typedef float Vec2[2];
 typedef struct {
 	size_t    count;
 	Vec2     *positions;
-	size_t   *cons;
-	float     total;
+	size_t   *cons; // connections indices
+	uint32_t  total;
 } TSP_Info;
 
 #define CON_AT(tsp, i) (tsp)->cons[(i) % (tsp)->count]
@@ -45,6 +46,33 @@ typedef struct {
 } Image;
 
 #define IMG_AT(img, x, y) img.pixels[y*img.w + x]
+
+typedef enum{
+	EUC2D,
+	GEO
+} Edge_Type;
+
+Edge_Type edge_type;
+
+uint32_t (*dist)(TSP_Info *tsp, int i, int j); // function pointer
+
+uint32_t dist_euc_2d(TSP_Info *tsp, int i, int j)
+{
+	int dx = (int)tsp->positions[i][0] - (int)tsp->positions[j][0];
+	int dy = (int)tsp->positions[i][1] - (int)tsp->positions[j][1];
+	return (uint32_t) (0.5 + sqrtf(dx*dx + dy*dy));
+}
+
+#define PI 3.141592
+uint32_t dist_geo(TSP_Info *tsp, int i, int j)
+{
+	// longitude and lattitude -> tsp.pos[i][1] and tsp.pos[i][0]
+	double q1 = cos( tsp->positions[i][1] - tsp->positions[j][1] );
+	double q2 = cos( tsp->positions[i][0] - tsp->positions[j][0] );
+	double q3 = cos( tsp->positions[i][0] + tsp->positions[j][0] );
+	double dij = (int) ( 6378.388 * acos( 0.5*((1.0+q1)*q2 - (1.0-q1)*q3) ) + 1.0);
+	return (uint32_t) dij;
+}
 
 // my weird addition to nob.h :)
 bool nob_sv_begins_cstr(Nob_String_View sv, const char *cstr)
@@ -63,7 +91,7 @@ bool nob_sv_begins_cstr(Nob_String_View sv, const char *cstr)
 	return true;
 }
 
-Nob_String_View nob_sv_chop(Nob_String_View *sv, size_t n)
+void nob_sv_chop(Nob_String_View *sv, size_t n)
 {
 
 	if (sv->count >= n) {
@@ -114,7 +142,6 @@ bool read_tsp(const char *tsp_file, TSP_Info *tsp_out)
 	nob_sv_chop(&text, 1); // chop the `:`
 	text = nob_sv_trim_left(text);
 
-
 	// we parse the dimension and malloc the tsp.
 	TSP_Info tsp = {0};
 	{
@@ -142,9 +169,38 @@ bool read_tsp(const char *tsp_file, TSP_Info *tsp_out)
 		assert(tsp.positions != NULL);
 		assert(tsp.cons != NULL);
 
-		printf("read_tsp: found %d coordinates\n", (int)dim);
+		printf("read_tsp: dimension of data is %d\n", (int)dim);
 	}
 
+	// search for EDGE_WEIGHT_TYPE: <EUC_2D|GEO>
+	// only EUC_2D, GEO available
+	const char *edge_str = "EDGE_WEIGHT_TYPE";
+	while (!nob_sv_begins_cstr(text, edge_str)) {
+		nob_sv_chop(&text, 1);
+	}
+	nob_sv_chop(&text, strlen(edge_str));
+	text = nob_sv_trim_left(text);
+
+	if (text.data[0] != ':') {
+		printf("read_tsp: error: expected a `:` here: EDGE_WEIGHT_TYPE <-\n");
+		return false;
+	}
+	nob_sv_chop(&text, 1); // chop the `:`
+	text = nob_sv_trim_left(text);
+
+	if (nob_sv_begins_cstr(text, "EUC_2D")) {
+		edge_type = EUC2D;
+		dist = &dist_euc_2d;
+	} else if (nob_sv_begins_cstr(text, "GEO")) {
+		edge_type = GEO;
+		dist = &dist_geo;
+	} else {
+		printf("read_tsp: error: only EUC_2D and GEO not implemented!\n");
+		return false;
+	}
+
+
+	// find the data now!!
 	// chop until first coordinate x: 1 x y
 	nob_sv_chop_by_delim(&text, '1');
 	text = nob_sv_trim_left(text);
@@ -166,9 +222,19 @@ bool read_tsp(const char *tsp_file, TSP_Info *tsp_out)
 				return false;
 			}
 
-			tsp.positions[index][i] = result;
+			if (edge_type == EUC2D) {
+				tsp.positions[index][i] = result;
+			} else if (edge_type == GEO) {
+				int deg = (int) (result + 0.5);
+				float min = result - deg;
+				tsp.positions[index][i] = PI * (deg + 5.0 * min / 3.0 ) / 180.0;
+			} else {
+				assert(false);
+			}
+
 			text = nob_sv_trim_left(text);
 		}
+
 		// find the next line begining with index ... ...
 		nob_sv_chop_by_delim(&text, ' ');
 		text = nob_sv_trim_left(text);
@@ -197,7 +263,7 @@ void normalize_bounds(Vec2 *positions, size_t count)
 	float normalize_factor_x = 1.0f / (max_x - min_x);
 	float normalize_factor_y = 1.0f / (max_y - min_y);
 
-	//printf("[w, h] before normalization [%f, %f]\n", max_x - min_x, max_y - min_y);
+	printf("\n[w, h] before normalization [%f, %f]\n", max_x - min_x, max_y - min_y);
 
 	for (size_t i = 0; i < count; ++i) {
 		positions[i][0] -= min_x;
@@ -302,13 +368,6 @@ void generate_png(const char *fname, TSP_Info tsp, int w, int h, uint32_t bg, ui
 	stbi_write_png(fname, img.w, img.h, 4, img.pixels, img.w*sizeof(img.pixels));
 }
 
-float dist(TSP_Info *tsp, int i, int j)
-{
-	float dx = tsp->positions[i][0] - tsp->positions[j][0];
-	float dy = tsp->positions[i][1] - tsp->positions[j][1];
-	return sqrtf(dx*dx + dy*dy);
-}
-
 void init_configuration(TSP_Info *tsp)
 {
 	tsp->total = 0;
@@ -323,7 +382,7 @@ void calc_total(TSP_Info *tsp)
 {
 	tsp->total = 0;
 	for (uint32_t i = 0; i < tsp->count; ++i) {
-		int next_index = tsp->cons[i];
+		uint32_t next_index = tsp->cons[i];
 		tsp->total += dist(tsp, i, next_index);
 	}
 }
@@ -339,45 +398,12 @@ bool only_one_loop(TSP_Info *tsp)
 	return (next == 0);
 }
 
-/*// propose a swap of two connections and return the diff in total length
-float propose_swap(TSP_Info *tsp, int i, int j)
-{
-	assert(i >= 0 && j >= 0 && i < tsp->count && j < tsp->count);
-	int t1 = tsp->cons[i];
-	int t2 = tsp->cons[j];
-	if (t1 == j || t2 == i) {
-		return FLT_MAX;
-	}
-	float l_prev = dist(tsp, i, t1) + dist(tsp, j, t2);
-	float l_new  = dist(tsp, i, t2) + dist(tsp, j, t1);
-	return l_new - l_prev;
-}
-
-void do_swap(TSP_Info *tsp, int i, int j)
-{
-	int t1 = tsp->cons[i];
-	int t2 = tsp->cons[j];
-	tsp->cons[i] = t2;
-	tsp->cons[j] = t1;
-}*/
-
-// fermi dirac
-float p(float dist, float temperature)
-{
-	return (float)1.0 / (1 + expf(dist/temperature));
-}
-
-
 //	# # # # # a b c d # # #
 //			  2 1 3 0
 //	       -> d b a c
 // generate a random permutation sequence of length n
-//
 // ok just use a shuffle :) reference:
 // https://stackoverflow.com/questions/6127503/shuffle-array-in-c
-//
-//
-
 void shuffle_con(TSP_Info *tsp, size_t start, size_t n)
 {
     if (n > 1)
@@ -393,12 +419,11 @@ void shuffle_con(TSP_Info *tsp, size_t start, size_t n)
     }
 }
 
-
-int main(void)
+// linearly decreased start_temp used with
+// fermi dirac distribution as acceptance probability
+// this kinda makes it a simulated annealing approach
+int run(const char *name, const char *file, int nsteps, float start_temperature)
 {
-	//const char *file = "test_data/usa13509.tsp";
-	const char *file = "test_data/berlin52.tsp";
-
 	TSP_Info tsp = {0};
 	read_tsp(file, &tsp);
 	init_configuration(&tsp);
@@ -406,47 +431,49 @@ int main(void)
 	assert(tsp.positions != NULL);
 	assert(tsp.cons != NULL);
 
-	shuffle_con(&tsp, 0, perm_len);
+	shuffle_con(&tsp, 0, tsp.count);
 	while (!only_one_loop(&tsp)) {
 		shuffle_con(&tsp, 0, tsp.count);
 	}
 	calc_total(&tsp);
 
-	generate_png("berlin_random.png", tsp, 1080, 720, 0xFF000000, 0xFFFF0000, 0xFF00FF00);
+	generate_png(nob_temp_sprintf("%s_random.png", name), tsp, 1080, 720,  0xFF662512, 0xFFefffed, 0xFF077c10);
 
 	float temperature;
-	float start_total = tsp.total;
+	int perm_len;
+	uint32_t start_total = tsp.total;
 	assert(only_one_loop(&tsp));
 
-	for (int step = 0; step < NSTEPS; step++) {
+	for (int step = 0; step < nsteps; step++) {
+		nob_temp_reset();
+
+		if (step % (nsteps/100) == 0) {
+			printf("%2d percent\n", (int) ((float)step * 100.0/(float)nsteps));
+		}
 		//assert(only_one_loop(&tsp));
-		temperature = start_temperature * (float)(NSTEPS - step - 1) / (float)NSTEPS;
+		temperature = start_temperature * (float)(nsteps - step - 1) / (float)nsteps;
+		perm_len = (rand() % (perm_max - perm_min)) + perm_min;
 		size_t random_con = rand()%tsp.count;
 
-		nob_temp_reset();
 		// backup the cons so we can restore if invalid
 		int *cons_window = nob_temp_alloc(sizeof(*(tsp.cons)) * perm_len);
-
 		for (int i = 0; i < perm_len; i++) {
 			cons_window[i] = CON_AT(&tsp, random_con + i);
 		}
-
-		float total_before = tsp.total;
-
+		uint32_t total_before = tsp.total;
 
 		shuffle_con(&tsp, random_con, perm_len);
-
 		while (!only_one_loop(&tsp)) {
 			shuffle_con(&tsp, random_con, perm_len);
 		}
 		calc_total(&tsp);
 
-		float delta_l = tsp.total - total_before;
+		int delta_l = (int)tsp.total - (int)total_before;
 		float random_p = (float)rand()/ (float)RAND_MAX;
 
-		if (delta_l != 0.0f && random_p < p(delta_l, temperature)) {
-			printf("%9s: ", nob_temp_sprintf("%zd", step));
-			printf("ACCEPTED dist change at temp `%f` with delta `%f` (random p=%f) \n", temperature, delta_l, random_p);
+		if (delta_l != 0 && random_p < p(delta_l, temperature)) {
+			//printf("%9s: ", nob_temp_sprintf("%zd", step));
+			//printf("ACCEPTED dist change at temp `%f` with delta `%f` (random p=%f) \n", temperature, delta_l, random_p);
 		} else {
 			//printf("Rejected dist change `%f` (random p=%f) with temperature `%f`\n", delta_l, random_p, temperature);
 			//restore!
@@ -455,28 +482,45 @@ int main(void)
 			}
 			calc_total(&tsp);
 		}
-
-		//printf("Total Distance is: %f\n", tsp.total);
 	}
 
+	generate_png(nob_temp_sprintf("%s_optimized.png", name), tsp, 1080, 720, 0xFF662512, 0xFFefffed, 0xFF077c10);
 
-	printf("\n--------\nSUMMARY:\n--------\n\n");
-	printf("Start config dist: %f\n", start_total);
-	printf("End config dist:   %f\n", tsp.total);
-	printf("End temperature:   %f\n", temperature);
-	printf("number of steps:   %d\n", NSTEPS);
 	printf("\n");
-	printf("Tour:\n1");
 
-	for (uint16_t i = 0; i < tsp.count; i++) {
-		printf(" -> %zd", tsp.cons[i] + 1);
+	if (tsp.count < 55) {
+		printf("Tour:\n1");
+		for (uint16_t i = 0; i < tsp.count; i++) {
+			printf(" -> %zd", tsp.cons[i] + 1);
+		}
 	}
 
-
-
-	printf("\n\n");
-	generate_png("berlin_optimized.png", tsp, 1080, 720, 0xFF000000, 0xFFFF0000, 0xFF00FF00);
-
+	printf("\n\n--------\nSUMMARY:\n--------\n\n");
+	printf("Name:            %s\n", name);
+	printf("Start tour dist: %d\n", start_total);
+	printf("End   tour dist: %d\n", tsp.total);
+	printf("End temperature: %f\n", temperature);
+	printf("number of steps: %d\n", nsteps);
+	printf("\n");
 
 	return 0;
 }
+
+int main()
+{
+    //                                      nsteps    start_temp
+	run("burma",  "test_data/burma14.tsp",  1000000,  1.0);
+	run("berlin", "test_data/berlin52.tsp", 10000000, 100.0);
+	//perm_min = 8;
+	//perm_max = 17;
+	//run("usa", "test_data/usa13509.tsp", 100000, 20.0);
+	return 0;
+}
+
+/* some optimal values from
+	http://comopt.ifi.uni-heidelberg.de/software/TSPLIB95/STSP.html
+
+	burma14 : 3323
+	berlin52 : 7542
+	usa13509 : 19982859
+*/
